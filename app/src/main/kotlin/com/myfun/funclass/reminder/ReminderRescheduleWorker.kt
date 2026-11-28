@@ -35,12 +35,12 @@ class ReminderRescheduleWorker(
         private const val WORK_NAME = "funclass_daily_reminder_reschedule"
 
         fun enqueuePeriodic(context: Context) {
-            val request = PeriodicWorkRequestBuilder<ReminderRescheduleWorker>(24, TimeUnit.HOURS)
+            val request = PeriodicWorkRequestBuilder<ReminderRescheduleWorker>(2, TimeUnit.HOURS)
                 .build()
             runCatching {
                 WorkManager.getInstance(context.applicationContext).enqueueUniquePeriodicWork(
                     WORK_NAME,
-                    ExistingPeriodicWorkPolicy.KEEP,
+                    ExistingPeriodicWorkPolicy.UPDATE,
                     request
                 )
             }

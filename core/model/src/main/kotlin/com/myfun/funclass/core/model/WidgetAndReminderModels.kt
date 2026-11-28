@@ -47,7 +47,8 @@ data class ReminderSettings(
     val vibrateEnabled: Boolean = true,
     val fluidCloudEnabled: Boolean = true,
     val fluidCloudShowCountdown: Boolean = true,
-    val useAlarmClockChannel: Boolean = false
+    val useAlarmClockChannel: Boolean = true,
+    val backgroundKeepAliveEnabled: Boolean = false
 )
 
 enum class AlarmItemType {

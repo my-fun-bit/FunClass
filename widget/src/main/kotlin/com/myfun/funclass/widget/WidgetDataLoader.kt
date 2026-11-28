@@ -1,6 +1,8 @@
 package com.myfun.funclass.widget
 
+import android.content.ComponentName
 import android.content.Context
+import android.content.Intent
 import androidx.glance.appwidget.GlanceAppWidgetManager
 import com.myfun.funclass.core.database.preferences.AppPreferencesRepository
 import com.myfun.funclass.core.database.repository.ScheduleRepository
@@ -32,7 +34,28 @@ data class WidgetSnapshot(
 )
 
 object WidgetDataLoader {
+    private const val ACTION_RESCHEDULE_SYNC = "com.myfun.funclass.ACTION_RESCHEDULE_SYNC"
+    private const val REMINDER_RECEIVER_CLASS = "com.myfun.funclass.reminder.ReminderBroadcastReceiver"
+    private const val SYNC_MIN_INTERVAL_MILLIS = 5 * 60_000L
+
+    @Volatile
+    private var lastSyncBroadcastMillis: Long = 0L
+
+    private fun triggerReminderSyncThrottled(context: Context) {
+        val now = System.currentTimeMillis()
+        if (now - lastSyncBroadcastMillis < SYNC_MIN_INTERVAL_MILLIS) return
+        lastSyncBroadcastMillis = now
+        runCatching {
+            val appCtx = context.applicationContext
+            val intent = Intent(ACTION_RESCHEDULE_SYNC).apply {
+                component = ComponentName(appCtx.packageName, REMINDER_RECEIVER_CLASS)
+            }
+            appCtx.sendBroadcast(intent)
+        }
+    }
+
     suspend fun loadSnapshot(context: Context, appWidgetId: Int): WidgetSnapshot {
+        triggerReminderSyncThrottled(context)
         val ep = EntryPointAccessors.fromApplication(context.applicationContext, WidgetEntryPoint::class.java)
         val repo = ep.scheduleRepository()
         val prefs = ep.appPreferencesRepository()

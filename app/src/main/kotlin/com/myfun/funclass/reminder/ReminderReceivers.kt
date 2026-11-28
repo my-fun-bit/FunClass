@@ -3,6 +3,7 @@ package com.myfun.funclass.reminder
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.os.PowerManager
 import dagger.hilt.EntryPoint
 import dagger.hilt.InstallIn
 import dagger.hilt.android.EntryPointAccessors
@@ -15,6 +16,36 @@ import kotlinx.coroutines.launch
 @InstallIn(SingletonComponent::class)
 interface ReminderEntryPoint {
     fun reminderScheduler(): ReminderScheduler
+}
+
+private const val RECEIVER_WAKELOCK_TIMEOUT_MILLIS = 20_000L
+
+private fun BroadcastReceiver.runAsyncWithWakeLock(
+    context: Context,
+    tag: String,
+    block: suspend () -> Unit
+) {
+    val pending = goAsync()
+    val pm = context.applicationContext.getSystemService(PowerManager::class.java)
+    val wakeLock = runCatching {
+        pm?.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "FunClass:$tag")?.apply {
+            setReferenceCounted(false)
+            acquire(RECEIVER_WAKELOCK_TIMEOUT_MILLIS)
+        }
+    }.getOrNull()
+
+    CoroutineScope(Dispatchers.IO).launch {
+        try {
+            runCatching { block() }
+        } finally {
+            runCatching {
+                if (wakeLock != null && wakeLock.isHeld) {
+                    wakeLock.release()
+                }
+            }
+            runCatching { pending.finish() }
+        }
+    }
 }
 
 class ReminderBroadcastReceiver : BroadcastReceiver() {
@@ -38,39 +69,44 @@ class ReminderBroadcastReceiver : BroadcastReceiver() {
                 }
             }
 
+            ACTION_KEEP_ALIVE_STOP -> {
+                ReminderKeepAliveService.stop(context.applicationContext)
+                runAsyncWithWakeLock(context, "KeepAliveStop") {
+                    scheduler.disableKeepAliveFromNotification()
+                }
+            }
+
+            ACTION_KEEP_ALIVE_AUTO_STOP,
+            ACTION_KEEP_ALIVE_WAKE,
+            ACTION_RESCHEDULE_SYNC -> {
+                runAsyncWithWakeLock(context, "RescheduleSync") {
+                    scheduler.rescheduleAll()
+                }
+            }
+
             ACTION_ENABLE_DND -> {
                 val eventStart = intent.getLongExtra(EXTRA_EVENT_START, System.currentTimeMillis())
                 val eventEnd = intent.getLongExtra(EXTRA_EVENT_END, eventStart)
                 val dndKey = intent.getStringExtra(EXTRA_OCCURRENCE_KEY).orEmpty()
-                val pending = goAsync()
-                CoroutineScope(Dispatchers.IO).launch {
-                    try {
-                        scheduler.handleEnableDnd(
-                            notificationId = notifId,
-                            dndKey = dndKey,
-                            eventStartMillis = eventStart,
-                            eventEndMillis = eventEnd
-                        )
-                    } finally {
-                        pending.finish()
-                    }
+                runAsyncWithWakeLock(context, "EnableDnd") {
+                    scheduler.handleEnableDnd(
+                        notificationId = notifId,
+                        dndKey = dndKey,
+                        eventStartMillis = eventStart,
+                        eventEndMillis = eventEnd
+                    )
                 }
             }
 
             ACTION_RESTORE_DND -> {
                 val eventEnd = intent.getLongExtra(EXTRA_EVENT_END, System.currentTimeMillis())
                 val dndKey = intent.getStringExtra(EXTRA_OCCURRENCE_KEY).orEmpty()
-                val pending = goAsync()
-                CoroutineScope(Dispatchers.IO).launch {
-                    try {
-                        scheduler.handleRestoreDnd(
-                            notificationId = notifId,
-                            dndKey = dndKey,
-                            scheduledEndMillis = eventEnd
-                        )
-                    } finally {
-                        pending.finish()
-                    }
+                runAsyncWithWakeLock(context, "RestoreDnd") {
+                    scheduler.handleRestoreDnd(
+                        notificationId = notifId,
+                        dndKey = dndKey,
+                        scheduledEndMillis = eventEnd
+                    )
                 }
             }
 
@@ -113,14 +149,9 @@ class ReminderBroadcastReceiver : BroadcastReceiver() {
                     scheduler.scheduleCountdownDismiss(autoDismissAt, notifId, occKey)
                 }
 
-                // Chain-reschedule subsequent days so reminders never dry up without opening the app
-                val pending = goAsync()
-                CoroutineScope(Dispatchers.IO).launch {
-                    try {
-                        scheduler.rescheduleAll()
-                    } finally {
-                        pending.finish()
-                    }
+                // Chain-reschedule under a short WakeLock so CPU does not sleep mid-reconcile
+                runAsyncWithWakeLock(context, "TriggerReminder") {
+                    scheduler.rescheduleAll()
                 }
             }
         }
@@ -131,6 +162,10 @@ class ReminderBroadcastReceiver : BroadcastReceiver() {
         const val ACTION_DISMISS_NOTIFICATION = "com.myfun.funclass.ACTION_DISMISS_NOTIFICATION"
         const val ACTION_ENABLE_DND = "com.myfun.funclass.ACTION_ENABLE_DND"
         const val ACTION_RESTORE_DND = "com.myfun.funclass.ACTION_RESTORE_DND"
+        const val ACTION_RESCHEDULE_SYNC = "com.myfun.funclass.ACTION_RESCHEDULE_SYNC"
+        const val ACTION_KEEP_ALIVE_STOP = "com.myfun.funclass.ACTION_KEEP_ALIVE_STOP"
+        const val ACTION_KEEP_ALIVE_AUTO_STOP = "com.myfun.funclass.ACTION_KEEP_ALIVE_AUTO_STOP"
+        const val ACTION_KEEP_ALIVE_WAKE = "com.myfun.funclass.ACTION_KEEP_ALIVE_WAKE"
 
         const val EXTRA_TITLE = "extra_title"
         const val EXTRA_SUBTITLE = "extra_subtitle"
@@ -150,14 +185,9 @@ class ReminderBroadcastReceiver : BroadcastReceiver() {
 class BootRescheduleReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         ReminderRescheduleWorker.enqueuePeriodic(context)
-        val pending = goAsync()
-        CoroutineScope(Dispatchers.IO).launch {
-            try {
-                val ep = EntryPointAccessors.fromApplication(context.applicationContext, ReminderEntryPoint::class.java)
-                ep.reminderScheduler().rescheduleAll()
-            } finally {
-                pending.finish()
-            }
+        runAsyncWithWakeLock(context, "BootReschedule") {
+            val ep = EntryPointAccessors.fromApplication(context.applicationContext, ReminderEntryPoint::class.java)
+            ep.reminderScheduler().rescheduleAll()
         }
     }
 }

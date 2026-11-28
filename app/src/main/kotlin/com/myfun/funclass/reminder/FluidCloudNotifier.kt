@@ -75,18 +75,86 @@ object FluidCloudNotifier {
     }
 
     fun openBatteryOptimizationSettings(context: Context) {
+        val pm = context.getSystemService(android.os.PowerManager::class.java)
+        val alreadyIgnoring = pm?.isIgnoringBatteryOptimizations(context.packageName) == true
+        if (!alreadyIgnoring) {
+            val directRequest = Intent(
+                Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                Uri.parse("package:${context.packageName}")
+            ).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            if (runCatching { context.startActivity(directRequest); true }.getOrDefault(false)) {
+                return
+            }
+        }
         val intent = Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS).apply {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
         runCatching { context.startActivity(intent) }.onFailure {
-            val appDetails = Intent(
-                Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
-                Uri.fromParts("package", context.packageName, null)
-            ).apply {
+            openAppDetailsSettings(context)
+        }
+    }
+
+    fun openAutoStartSettings(context: Context) {
+        val candidates = listOf(
+            // ColorOS / OPPO / OnePlus / Realme
+            android.content.ComponentName(
+                "com.coloros.safecenter",
+                "com.coloros.safecenter.permission.startup.StartupAppListActivity"
+            ),
+            android.content.ComponentName(
+                "com.oplus.safecenter",
+                "com.oplus.safecenter.permission.startup.StartupAppListActivity"
+            ),
+            android.content.ComponentName(
+                "com.coloros.safecenter",
+                "com.coloros.safecenter.startupapp.StartupAppListActivity"
+            ),
+            // Xiaomi HyperOS / MIUI
+            android.content.ComponentName(
+                "com.miui.securitycenter",
+                "com.miui.permcenter.autostart.AutoStartManagementActivity"
+            ),
+            // vivo OriginOS / FuntouchOS
+            android.content.ComponentName(
+                "com.iqoo.secure",
+                "com.iqoo.secure.ui.phoneoptimize.BgStartUpManager"
+            ),
+            android.content.ComponentName(
+                "com.vivo.permissionmanager",
+                "com.vivo.permissionmanager.activity.BgStartUpManagerActivity"
+            ),
+            // Huawei / Honor
+            android.content.ComponentName(
+                "com.huawei.systemmanager",
+                "com.huawei.systemmanager.startupmgr.ui.StartupNormalAppListActivity"
+            ),
+            android.content.ComponentName(
+                "com.hihonor.systemmanager",
+                "com.hihonor.systemmanager.startupmgr.ui.StartupNormalAppListActivity"
+            )
+        )
+        for (component in candidates) {
+            val intent = Intent().apply {
+                this.component = component
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
-            runCatching { context.startActivity(appDetails) }
+            if (runCatching { context.startActivity(intent); true }.getOrDefault(false)) {
+                return
+            }
         }
+        openAppDetailsSettings(context)
+    }
+
+    fun openAppDetailsSettings(context: Context) {
+        val appDetails = Intent(
+            Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+            Uri.fromParts("package", context.packageName, null)
+        ).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        runCatching { context.startActivity(appDetails) }
     }
 
     @SuppressLint("MissingPermission")

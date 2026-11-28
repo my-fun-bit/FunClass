@@ -20,7 +20,10 @@ import com.myfun.funclass.core.model.ScheduledAlarmItem
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import java.time.Instant
 import java.time.LocalDateTime
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -41,6 +44,7 @@ object ReminderDecisionEngine {
     const val DND_RESTORE_OFFSET = 90_000
     const val DND_ENABLE_OFFSET = 120_000
     const val DND_HANDOVER_TOLERANCE_MILLIS = 5_000L
+    const val KEEP_ALIVE_PRE_START_MILLIS = 30L * 60_000L
 
     data class PostedEntry(
         val key: String,
@@ -74,6 +78,14 @@ object ReminderDecisionEngine {
         val ongoingToActivate: List<CourseDndWindow>,
         val futureToSchedule: List<CourseDndWindow>,
         val shouldRestoreDndNow: Boolean
+    )
+
+    data class KeepAlivePlan(
+        val shouldRunNow: Boolean,
+        val stopAtMillis: Long?,
+        val nextStartAtMillis: Long?,
+        val nextItemTitle: String?,
+        val nextItemStartMillis: Long?
     )
 
     fun stableNotificationId(occurrenceId: String): Int =
@@ -182,6 +194,73 @@ object ReminderDecisionEngine {
         return windows
             .filter { it.startEpochMillis <= checkPoint && it.endEpochMillis > checkPoint }
             .maxByOrNull { it.endEpochMillis }
+    }
+
+    /**
+     * Pure-JVM decision for the optional daytime foreground guardian service:
+     * - Runs only when both reminders and backgroundKeepAliveEnabled are turned on and today still
+     *   has at least one upcoming/ongoing item.
+     * - Automatically computes the stop timestamp after today's last item finishes so the service
+     *   does not stay alive overnight.
+     * - When today's items are finished, schedules a wake timestamp before the next future day's
+     *   first reminder.
+     */
+    fun computeKeepAlivePlan(
+        items: List<ScheduledAlarmItem>,
+        remindersEnabled: Boolean,
+        keepAliveEnabled: Boolean,
+        nowMillis: Long,
+        todayEndMillis: Long
+    ): KeepAlivePlan {
+        if (!remindersEnabled || !keepAliveEnabled) {
+            return KeepAlivePlan(
+                shouldRunNow = false,
+                stopAtMillis = null,
+                nextStartAtMillis = null,
+                nextItemTitle = null,
+                nextItemStartMillis = null
+            )
+        }
+
+        fun itemKeepAliveUntil(item: ScheduledAlarmItem): Long {
+            val dismissAt = item.eventStartEpochMillis + maxOf(item.autoDismissMinutes, 1) * 60_000L
+            return maxOf(item.eventEndEpochMillis, dismissAt)
+        }
+
+        val todayRemaining = items
+            .filter { item ->
+                val isTodayItem = item.triggerEpochMillis < todayEndMillis || item.eventStartEpochMillis < todayEndMillis
+                isTodayItem && itemKeepAliveUntil(item) > nowMillis
+            }
+            .sortedBy { it.eventStartEpochMillis }
+
+        if (todayRemaining.isNotEmpty()) {
+            val stopAt = todayRemaining.maxOf { itemKeepAliveUntil(it) }
+            val nextItem = todayRemaining.firstOrNull { it.eventStartEpochMillis >= nowMillis }
+                ?: todayRemaining.first()
+            return KeepAlivePlan(
+                shouldRunNow = true,
+                stopAtMillis = stopAt,
+                nextStartAtMillis = null,
+                nextItemTitle = nextItem.title,
+                nextItemStartMillis = nextItem.eventStartEpochMillis
+            )
+        }
+
+        val nextFuture = items
+            .filter { it.triggerEpochMillis >= todayEndMillis || it.eventStartEpochMillis >= todayEndMillis }
+            .minByOrNull { it.triggerEpochMillis }
+
+        val nextStart = nextFuture?.let {
+            (it.triggerEpochMillis - KEEP_ALIVE_PRE_START_MILLIS).coerceAtLeast(nowMillis + 60_000L)
+        }
+        return KeepAlivePlan(
+            shouldRunNow = false,
+            stopAtMillis = null,
+            nextStartAtMillis = nextStart,
+            nextItemTitle = nextFuture?.title,
+            nextItemStartMillis = nextFuture?.eventStartEpochMillis
+        )
     }
 }
 
@@ -669,8 +748,109 @@ class ReminderScheduler @Inject constructor(
         }
         stateStore.saveScheduledDndEnableCodes(newScheduledDndCodes)
 
+        // 6. Reconcile optional daytime foreground keep-alive guardian service
+        val todayEndMillis = nowDt.toLocalDate()
+            .plusDays(1)
+            .atStartOfDay(ZoneId.systemDefault())
+            .toInstant()
+            .toEpochMilli()
+        val keepAlivePlan = ReminderDecisionEngine.computeKeepAlivePlan(
+            items = upcoming,
+            remindersEnabled = settings.enabled,
+            keepAliveEnabled = settings.backgroundKeepAliveEnabled,
+            nowMillis = nowMillis,
+            todayEndMillis = todayEndMillis
+        )
+        syncKeepAliveService(keepAlivePlan, exact)
+
         return@withLock plan.futureItemsToSchedule.size + plan.itemsToPostImmediately.size
     }
+
+    suspend fun disableKeepAliveFromNotification() = reconcileMutex.withLock {
+        val current = prefs.getReminderSettingsOnce()
+        if (current.backgroundKeepAliveEnabled) {
+            prefs.updateReminderSettings(current.copy(backgroundKeepAliveEnabled = false))
+        }
+        ReminderKeepAliveService.stop(context)
+        cancelKeepAliveStop()
+        cancelKeepAliveWake()
+    }
+
+    private fun syncKeepAliveService(plan: ReminderDecisionEngine.KeepAlivePlan, exact: Boolean) {
+        if (plan.shouldRunNow) {
+            cancelKeepAliveWake()
+            val summary = buildKeepAliveSummary(plan)
+            ReminderKeepAliveService.startOrUpdate(context, summary)
+            plan.stopAtMillis?.let { stopAt ->
+                scheduleKeepAliveAutoStop(stopAt, exact)
+            }
+        } else {
+            ReminderKeepAliveService.stop(context)
+            cancelKeepAliveStop()
+            val nextStart = plan.nextStartAtMillis
+            if (nextStart != null) {
+                scheduleKeepAliveWake(nextStart, exact)
+            } else {
+                cancelKeepAliveWake()
+            }
+        }
+    }
+
+    private fun buildKeepAliveSummary(plan: ReminderDecisionEngine.KeepAlivePlan): String {
+        val zone = ZoneId.systemDefault()
+        val timeFmt = DateTimeFormatter.ofPattern("HH:mm")
+        val nextPart = plan.nextItemTitle?.let { title ->
+            val timeStr = plan.nextItemStartMillis?.let {
+                Instant.ofEpochMilli(it).atZone(zone).toLocalTime().format(timeFmt)
+            }
+            if (timeStr != null) "下一项 $timeStr $title" else "下一项 $title"
+        }
+        val stopPart = plan.stopAtMillis?.let {
+            val stopStr = Instant.ofEpochMilli(it).atZone(zone).toLocalTime().format(timeFmt)
+            "${stopStr}自动停止"
+        }
+        return listOfNotNull(nextPart, stopPart)
+            .joinToString(" · ")
+            .ifBlank { "今日课表与流体云提醒守护中" }
+    }
+
+    private fun scheduleKeepAliveAutoStop(stopAtMillis: Long, exact: Boolean) {
+        val intent = Intent(context, ReminderBroadcastReceiver::class.java).apply {
+            action = ReminderBroadcastReceiver.ACTION_KEEP_ALIVE_AUTO_STOP
+        }
+        val pi = PendingIntent.getBroadcast(
+            context,
+            ReminderKeepAliveService.KEEP_ALIVE_STOP_REQUEST_CODE,
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        scheduleAlarmInternal(stopAtMillis, pi, exact)
+    }
+
+    private fun cancelKeepAliveStop() =
+        cancelAlarmByAction(
+            ReminderBroadcastReceiver.ACTION_KEEP_ALIVE_AUTO_STOP,
+            ReminderKeepAliveService.KEEP_ALIVE_STOP_REQUEST_CODE
+        )
+
+    private fun scheduleKeepAliveWake(wakeAtMillis: Long, exact: Boolean) {
+        val intent = Intent(context, ReminderBroadcastReceiver::class.java).apply {
+            action = ReminderBroadcastReceiver.ACTION_KEEP_ALIVE_WAKE
+        }
+        val pi = PendingIntent.getBroadcast(
+            context,
+            ReminderKeepAliveService.KEEP_ALIVE_WAKE_REQUEST_CODE,
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        scheduleAlarmInternal(wakeAtMillis, pi, exact)
+    }
+
+    private fun cancelKeepAliveWake() =
+        cancelAlarmByAction(
+            ReminderBroadcastReceiver.ACTION_KEEP_ALIVE_WAKE,
+            ReminderKeepAliveService.KEEP_ALIVE_WAKE_REQUEST_CODE
+        )
 
     suspend fun handleEnableDnd(
         notificationId: Int,
@@ -903,6 +1083,7 @@ class ReminderScheduler @Inject constructor(
     }
 
     private fun scheduleAlarmClockChannel(triggerMillis: Long, pi: PendingIntent) {
+        val safeTriggerMillis = maxOf(triggerMillis, System.currentTimeMillis() + 1_000L)
         val showIntent = PendingIntent.getActivity(
             context,
             1,
@@ -912,9 +1093,9 @@ class ReminderScheduler @Inject constructor(
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
         runCatching {
-            alarmManager.setAlarmClock(AlarmManager.AlarmClockInfo(triggerMillis, showIntent), pi)
+            alarmManager.setAlarmClock(AlarmManager.AlarmClockInfo(safeTriggerMillis, showIntent), pi)
         }.onFailure {
-            scheduleAlarmInternal(triggerMillis, pi, exact = true)
+            scheduleAlarmInternal(safeTriggerMillis, pi, exact = true)
         }
     }
 

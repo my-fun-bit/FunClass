@@ -33,11 +33,22 @@ class FunClassApplication : Application() {
             description = "个人日程与待办提醒通知"
             enableVibration(true)
         }
-        manager.createNotificationChannels(listOf(courseChannel, calendarChannel))
+        val keepAliveChannel = NotificationChannel(
+            CHANNEL_KEEP_ALIVE,
+            "后台提醒守护（静默）",
+            NotificationManager.IMPORTANCE_MIN
+        ).apply {
+            description = "开启后台常驻防杀时用于保障课前提醒与流体云稳定触发，当日课程结束后自动关闭"
+            setShowBadge(false)
+            enableVibration(false)
+            setSound(null, null)
+        }
+        manager.createNotificationChannels(listOf(courseChannel, calendarChannel, keepAliveChannel))
     }
 
     companion object {
         const val CHANNEL_COURSE_REMINDER = "funclass_course_reminder"
         const val CHANNEL_CALENDAR_REMINDER = "funclass_calendar_reminder"
+        const val CHANNEL_KEEP_ALIVE = "funclass_keep_alive"
     }
 }

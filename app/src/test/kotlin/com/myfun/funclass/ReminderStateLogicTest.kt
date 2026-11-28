@@ -5,6 +5,7 @@ import com.myfun.funclass.core.model.CourseDndWindow
 import com.myfun.funclass.core.model.ScheduledAlarmItem
 import com.myfun.funclass.reminder.FluidCloudNotifier
 import com.myfun.funclass.reminder.ReminderDecisionEngine
+import com.myfun.funclass.reminder.ReminderKeepAliveService
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
@@ -349,5 +350,101 @@ class ReminderStateLogicTest {
                 scheduledEndMillis = c1End
             )
         )
+    }
+
+    @Test
+    fun keepAliveIds_doNotCollideWithReminderOrTestIds() {
+        val reserved = setOf(
+            ReminderKeepAliveService.KEEP_ALIVE_NOTIFICATION_ID,
+            ReminderKeepAliveService.KEEP_ALIVE_STOP_REQUEST_CODE,
+            ReminderKeepAliveService.KEEP_ALIVE_WAKE_REQUEST_CODE
+        )
+        assertEquals(3, reserved.size)
+        assertFalse(FluidCloudNotifier.TEST_NOTIFICATION_ID in reserved)
+        val sampleIds = (1..200).map { ReminderDecisionEngine.stableNotificationId("course_${it}_1_2026-11-28") }
+        for (id in sampleIds) {
+            assertFalse(id in reserved)
+            assertFalse((id + ReminderDecisionEngine.DISMISS_ACTION_OFFSET) in reserved)
+            assertFalse((id + ReminderDecisionEngine.AUTO_DISMISS_OFFSET) in reserved)
+            assertFalse((id + ReminderDecisionEngine.DND_RESTORE_OFFSET) in reserved)
+            assertFalse((id + ReminderDecisionEngine.DND_ENABLE_OFFSET) in reserved)
+        }
+    }
+
+    @Test
+    fun keepAlivePlan_runsOnlyDuringActiveDayAndSchedulesNextDayWake() {
+        val now = 10_000_000L
+        val todayEnd = now + 8 * 3600_000L
+        val todayEarly = mkItem(
+            id = "course_1_1_2026-11-28",
+            trigger = now + 15 * 60_000L,
+            start = now + 30 * 60_000L,
+            isActiveWindow = false
+        ).copy(title = "线性代数", eventEndEpochMillis = now + 120 * 60_000L)
+        val todayLate = mkItem(
+            id = "course_2_2_2026-11-28",
+            trigger = now + 3 * 3600_000L,
+            start = now + 3 * 3600_000L + 15 * 60_000L,
+            isActiveWindow = false
+        ).copy(title = "数据结构", eventEndEpochMillis = now + 5 * 3600_000L)
+        val tomorrowFirst = mkItem(
+            id = "course_3_1_2026-11-29",
+            trigger = todayEnd + 8 * 3600_000L,
+            start = todayEnd + 8 * 3600_000L + 15 * 60_000L,
+            isActiveWindow = false
+        ).copy(title = "计算机网络", eventEndEpochMillis = todayEnd + 10 * 3600_000L)
+
+        // 1. Disabled -> never runs
+        val disabledPlan = ReminderDecisionEngine.computeKeepAlivePlan(
+            items = listOf(todayEarly, todayLate, tomorrowFirst),
+            remindersEnabled = true,
+            keepAliveEnabled = false,
+            nowMillis = now,
+            todayEndMillis = todayEnd
+        )
+        assertFalse(disabledPlan.shouldRunNow)
+        assertNull(disabledPlan.stopAtMillis)
+        assertNull(disabledPlan.nextStartAtMillis)
+
+        // 2. Today still has classes -> run now and stop after last class of today
+        val activeDayPlan = ReminderDecisionEngine.computeKeepAlivePlan(
+            items = listOf(todayEarly, todayLate, tomorrowFirst),
+            remindersEnabled = true,
+            keepAliveEnabled = true,
+            nowMillis = now,
+            todayEndMillis = todayEnd
+        )
+        assertTrue(activeDayPlan.shouldRunNow)
+        assertEquals(todayLate.eventEndEpochMillis, activeDayPlan.stopAtMillis)
+        assertEquals("线性代数", activeDayPlan.nextItemTitle)
+        assertNull(activeDayPlan.nextStartAtMillis)
+
+        // 3. After today's last class -> stop now and schedule next-day pre-start wake
+        val eveningNow = todayLate.eventEndEpochMillis + 60_000L
+        val eveningPlan = ReminderDecisionEngine.computeKeepAlivePlan(
+            items = listOf(tomorrowFirst),
+            remindersEnabled = true,
+            keepAliveEnabled = true,
+            nowMillis = eveningNow,
+            todayEndMillis = todayEnd
+        )
+        assertFalse(eveningPlan.shouldRunNow)
+        assertNull(eveningPlan.stopAtMillis)
+        assertEquals(
+            tomorrowFirst.triggerEpochMillis - ReminderDecisionEngine.KEEP_ALIVE_PRE_START_MILLIS,
+            eveningPlan.nextStartAtMillis
+        )
+        assertEquals("计算机网络", eveningPlan.nextItemTitle)
+
+        // 4. No upcoming items -> stay idle with no wake alarm
+        val emptyPlan = ReminderDecisionEngine.computeKeepAlivePlan(
+            items = emptyList(),
+            remindersEnabled = true,
+            keepAliveEnabled = true,
+            nowMillis = eveningNow,
+            todayEndMillis = todayEnd
+        )
+        assertFalse(emptyPlan.shouldRunNow)
+        assertNull(emptyPlan.nextStartAtMillis)
     }
 }

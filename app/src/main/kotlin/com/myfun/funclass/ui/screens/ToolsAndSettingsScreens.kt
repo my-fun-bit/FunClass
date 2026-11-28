@@ -13,6 +13,7 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.runtime.DisposableEffect
 import com.myfun.funclass.BuildConfig
 import com.myfun.funclass.reminder.FluidCloudNotifier
+import com.myfun.funclass.reminder.ReminderKeepAliveService
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -1858,6 +1859,7 @@ fun ReminderSettingsScreen(
     var canScheduleExact by remember { mutableStateOf(checkCanScheduleExact()) }
     var isIgnoringBattery by remember { mutableStateOf(checkIsIgnoringBatteryOptimizations()) }
     var hasDndPermission by remember { mutableStateOf(checkHasDndPermission()) }
+    var isKeepAliveRunning by remember { mutableStateOf(ReminderKeepAliveService.isRunning) }
     var lastTestResult by remember { mutableStateOf<String?>(null) }
 
     val notifPermLauncher = rememberLauncherForActivityResult(
@@ -1876,6 +1878,7 @@ fun ReminderSettingsScreen(
                 canScheduleExact = checkCanScheduleExact()
                 isIgnoringBattery = checkIsIgnoringBatteryOptimizations()
                 hasDndPermission = checkHasDndPermission()
+                isKeepAliveRunning = ReminderKeepAliveService.isRunning
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -1995,6 +1998,21 @@ fun ReminderSettingsScreen(
                 }
             }
             Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                SwitchRow("后台常驻防杀（按天自动启停）", s.backgroundKeepAliveEnabled) { enabled ->
+                    onUpdateSettings(s.copy(backgroundKeepAliveEnabled = enabled))
+                    if (!enabled) {
+                        isKeepAliveRunning = false
+                    }
+                }
+                if (state.showHelperDescriptions) {
+                    Text(
+                        "仅在今日仍有待上课或日程时开启极简静默前台守护，并在解锁亮屏时自动补发漏触发的流体云；今日最后一项结束后自动停止，夜间不常驻。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 SwitchRow("上课自动开启勿扰静音（下课恢复）", s.autoMuteDuringClass) { onUpdateSettings(s.copy(autoMuteDuringClass = it)) }
                 if (state.showHelperDescriptions) {
                     Text(
@@ -2030,9 +2048,29 @@ fun ReminderSettingsScreen(
                         text = "电池优化白名单：${if (isIgnoringBattery) "已放行（后台可稳定触发）✓" else "未放行（息屏或后台可能延迟提醒）"}",
                         color = if (isIgnoringBattery) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
                     )
-                    OutlinedButton(onClick = {
-                        FluidCloudNotifier.openBatteryOptimizationSettings(context)
-                    }) { Text("电池与后台设置") }
+                    Text(
+                        text = "后台守护服务：${
+                            when {
+                                !s.backgroundKeepAliveEnabled -> "未开启"
+                                isKeepAliveRunning || ReminderKeepAliveService.isRunning -> "运行中（今日结束后自动停止）✓"
+                                else -> "已开启（今日无剩余课程，待机中）"
+                            }
+                        }",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (s.backgroundKeepAliveEnabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(
+                            onClick = { FluidCloudNotifier.openBatteryOptimizationSettings(context) },
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 10.dp),
+                            modifier = Modifier.weight(1f)
+                        ) { Text(if (isIgnoringBattery) "电池设置" else "一键放行电池", maxLines = 1, softWrap = false) }
+                        OutlinedButton(
+                            onClick = { FluidCloudNotifier.openAutoStartSettings(context) },
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 10.dp),
+                            modifier = Modifier.weight(1f)
+                        ) { Text("自启动 / 后台管理", maxLines = 1, softWrap = false) }
+                    }
                     Text("勿扰策略权限：${if (hasDndPermission) "已授权 ✓" else "未授权（开启自动静音前需要）"}")
                     if (!hasDndPermission) {
                         OutlinedButton(onClick = {
