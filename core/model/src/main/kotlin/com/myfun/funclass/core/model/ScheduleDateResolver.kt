@@ -352,6 +352,57 @@ object ScheduleDateResolver {
         return results.sortedBy { it.triggerEpochMillis }
     }
 
+    /**
+     * Generates upcoming course auto-DND windows (`[startTime, endTime)`) within [horizonDays]
+     * from [now], honoring holidays and shifted workdays.
+     */
+    fun generateCourseDndWindows(
+        table: ScheduleTable,
+        timeScheme: TimeScheme,
+        courses: List<Course>,
+        adjustments: List<HolidayAdjustment>,
+        settings: ReminderSettings,
+        now: LocalDateTime = LocalDateTime.now(),
+        horizonDays: Int = 7,
+        zone: ZoneId = ZoneId.systemDefault()
+    ): List<CourseDndWindow> {
+        if (!settings.autoMuteDuringClass) return emptyList()
+        val nowMillis = now.atZone(zone).toInstant().toEpochMilli()
+        val results = mutableListOf<CourseDndWindow>()
+
+        for (dayOffset in 0 until horizonDays) {
+            val date = now.toLocalDate().plusDays(dayOffset.toLong())
+            val resolved = resolveDay(
+                table = table,
+                timeScheme = timeScheme,
+                date = date,
+                courses = courses,
+                adjustments = adjustments,
+                zone = zone
+            )
+
+            for (item in resolved.courses) {
+                val startMillis = LocalDateTime.of(date, item.startTime)
+                    .atZone(zone)
+                    .toInstant()
+                    .toEpochMilli()
+                val endMillis = LocalDateTime.of(date, item.endTime)
+                    .atZone(zone)
+                    .toInstant()
+                    .toEpochMilli()
+                if (endMillis > startMillis && endMillis > nowMillis) {
+                    results += CourseDndWindow(
+                        id = "course_${item.course.id}_${item.session.id}_$date",
+                        title = item.course.name,
+                        startEpochMillis = startMillis,
+                        endEpochMillis = endMillis
+                    )
+                }
+            }
+        }
+        return results.sortedBy { it.startEpochMillis }
+    }
+
     private fun collectCoursesForDay(
         courses: List<Course>,
         timeScheme: TimeScheme,

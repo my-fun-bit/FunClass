@@ -398,4 +398,98 @@ class WeekSetAndResolverTest {
         val futureCalAlarm = alarms.first { it.title == "组会" }
         assertFalse(futureCalAlarm.isActiveCountdownWindow)
     }
+
+    @Test
+    fun generateCourseDndWindows_usesClassStartAndEndRegardlessOfReminderLeadMinutes() {
+        val zone = ZoneId.of("Asia/Shanghai")
+        val scheme = DefaultTimeSchemes.standardCollege(1L)
+        val table = ScheduleTable(id = 1L, timeSchemeId = 1L, termStartDate = "2026-09-07")
+        // Monday Week 1: node 1..2 is 08:00 - 09:40
+        val course = Course(
+            id = 1L,
+            tableId = 1L,
+            name = "线性代数",
+            sessions = listOf(
+                CourseSession(
+                    id = 10L,
+                    courseId = 1L,
+                    tableId = 1L,
+                    dayOfWeek = 1,
+                    startNode = 1,
+                    nodeCount = 2,
+                    weeks = WeekSet.range(1, 16),
+                    room = "东教学楼-201"
+                )
+            )
+        )
+
+        // Even with 30-min reminder lead and now=07:45 (inside reminder window), DND starts at 08:00!
+        val windows = ScheduleDateResolver.generateCourseDndWindows(
+            table = table,
+            timeScheme = scheme,
+            courses = listOf(course),
+            adjustments = emptyList(),
+            settings = ReminderSettings(
+                enabled = false,
+                courseMinutesBefore = 30,
+                countdownNotificationEnabled = false,
+                fluidCloudEnabled = false,
+                autoMuteDuringClass = true
+            ),
+            now = LocalDateTime.of(2026, 9, 7, 7, 45),
+            horizonDays = 1,
+            zone = zone
+        )
+
+        assertEquals(1, windows.size)
+        val expectedStart = LocalDateTime.of(2026, 9, 7, 8, 0).atZone(zone).toInstant().toEpochMilli()
+        val expectedEnd = LocalDateTime.of(2026, 9, 7, 9, 40).atZone(zone).toInstant().toEpochMilli()
+        assertEquals(expectedStart, windows.first().startEpochMillis)
+        assertEquals(expectedEnd, windows.first().endEpochMillis)
+
+        // Disabled autoMuteDuringClass -> empty
+        val disabled = ScheduleDateResolver.generateCourseDndWindows(
+            table = table,
+            timeScheme = scheme,
+            courses = listOf(course),
+            adjustments = emptyList(),
+            settings = ReminderSettings(enabled = true, autoMuteDuringClass = false),
+            now = LocalDateTime.of(2026, 9, 7, 7, 45),
+            horizonDays = 1,
+            zone = zone
+        )
+        assertTrue(disabled.isEmpty())
+
+        // Holiday OFF -> skipped; after class ends -> skipped
+        val holidayOff = ScheduleDateResolver.generateCourseDndWindows(
+            table = table,
+            timeScheme = scheme,
+            courses = listOf(course),
+            adjustments = listOf(
+                HolidayAdjustment(
+                    id = 1L,
+                    tableId = 1L,
+                    targetDate = "2026-09-07",
+                    adjustType = HolidayAdjustType.OFF
+                )
+            ),
+            settings = ReminderSettings(autoMuteDuringClass = true),
+            now = LocalDateTime.of(2026, 9, 7, 7, 45),
+            horizonDays = 1,
+            zone = zone
+        )
+        assertTrue(holidayOff.isEmpty())
+
+        val afterClass = ScheduleDateResolver.generateCourseDndWindows(
+            table = table,
+            timeScheme = scheme,
+            courses = listOf(course),
+            adjustments = emptyList(),
+            settings = ReminderSettings(autoMuteDuringClass = true),
+            now = LocalDateTime.of(2026, 9, 7, 9, 40),
+            horizonDays = 1,
+            zone = zone
+        )
+        assertTrue(afterClass.isEmpty())
+    }
 }

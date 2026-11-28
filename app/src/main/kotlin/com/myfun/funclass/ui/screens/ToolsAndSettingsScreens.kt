@@ -1994,7 +1994,16 @@ fun ReminderSettingsScreen(
                     )
                 }
             }
-            SwitchRow("上课自动开启勿扰静音（下课恢复）", s.autoMuteDuringClass) { onUpdateSettings(s.copy(autoMuteDuringClass = it)) }
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                SwitchRow("上课自动开启勿扰静音（下课恢复）", s.autoMuteDuringClass) { onUpdateSettings(s.copy(autoMuteDuringClass = it)) }
+                if (state.showHelperDescriptions) {
+                    Text(
+                        "仅在上课时间段（上课开始至下课结束）自动开启勿扰静音，不受课前提前提醒时长影响。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
 
             Text("课前提前提醒分钟数：${s.courseMinutesBefore} 分钟")
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {

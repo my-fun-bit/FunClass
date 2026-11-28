@@ -67,3 +67,10 @@ data class ScheduledAlarmItem(
     val autoDismissMinutes: Int,
     val isActiveCountdownWindow: Boolean = false
 )
+
+data class CourseDndWindow(
+    val id: String,
+    val title: String,
+    val startEpochMillis: Long,
+    val endEpochMillis: Long
+)

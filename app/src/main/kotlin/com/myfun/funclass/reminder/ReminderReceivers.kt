@@ -1,6 +1,5 @@
 package com.myfun.funclass.reminder
 
-import android.app.NotificationManager
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -21,7 +20,6 @@ interface ReminderEntryPoint {
 class ReminderBroadcastReceiver : BroadcastReceiver() {
 
     override fun onReceive(context: Context, intent: Intent) {
-        val nm = context.getSystemService(NotificationManager::class.java) ?: return
         val notifId = intent.getIntExtra(EXTRA_NOTIFICATION_ID, 1001)
         val ep = EntryPointAccessors.fromApplication(context.applicationContext, ReminderEntryPoint::class.java)
         val scheduler = ep.reminderScheduler()
@@ -40,9 +38,39 @@ class ReminderBroadcastReceiver : BroadcastReceiver() {
                 }
             }
 
+            ACTION_ENABLE_DND -> {
+                val eventStart = intent.getLongExtra(EXTRA_EVENT_START, System.currentTimeMillis())
+                val eventEnd = intent.getLongExtra(EXTRA_EVENT_END, eventStart)
+                val dndKey = intent.getStringExtra(EXTRA_OCCURRENCE_KEY).orEmpty()
+                val pending = goAsync()
+                CoroutineScope(Dispatchers.IO).launch {
+                    try {
+                        scheduler.handleEnableDnd(
+                            notificationId = notifId,
+                            dndKey = dndKey,
+                            eventStartMillis = eventStart,
+                            eventEndMillis = eventEnd
+                        )
+                    } finally {
+                        pending.finish()
+                    }
+                }
+            }
+
             ACTION_RESTORE_DND -> {
-                if (nm.isNotificationPolicyAccessGranted) {
-                    runCatching { nm.setInterruptionFilter(NotificationManager.INTERRUPTION_FILTER_ALL) }
+                val eventEnd = intent.getLongExtra(EXTRA_EVENT_END, System.currentTimeMillis())
+                val dndKey = intent.getStringExtra(EXTRA_OCCURRENCE_KEY).orEmpty()
+                val pending = goAsync()
+                CoroutineScope(Dispatchers.IO).launch {
+                    try {
+                        scheduler.handleRestoreDnd(
+                            notificationId = notifId,
+                            dndKey = dndKey,
+                            scheduledEndMillis = eventEnd
+                        )
+                    } finally {
+                        pending.finish()
+                    }
                 }
             }
 
@@ -52,10 +80,8 @@ class ReminderBroadcastReceiver : BroadcastReceiver() {
                 val explicitLocation = intent.getStringExtra(EXTRA_LOCATION).orEmpty().trim()
                 val isCourse = intent.getBooleanExtra(EXTRA_IS_COURSE, true)
                 val eventStart = intent.getLongExtra(EXTRA_EVENT_START, System.currentTimeMillis())
-                val eventEnd = intent.getLongExtra(EXTRA_EVENT_END, eventStart + 45 * 60_000L)
                 val countdown = intent.getBooleanExtra(EXTRA_COUNTDOWN, true)
                 val autoDismissMin = intent.getIntExtra(EXTRA_AUTO_DISMISS_MIN, 10)
-                val autoMute = intent.getBooleanExtra(EXTRA_AUTO_MUTE, false)
                 val fluidCloud = intent.getBooleanExtra(EXTRA_FLUID_CLOUD, true)
                 val fluidShowCountdown = intent.getBooleanExtra(EXTRA_FLUID_SHOW_COUNTDOWN, true)
                 val occKey = intent.getStringExtra(EXTRA_OCCURRENCE_KEY).orEmpty()
@@ -87,13 +113,6 @@ class ReminderBroadcastReceiver : BroadcastReceiver() {
                     scheduler.scheduleCountdownDismiss(autoDismissAt, notifId, occKey)
                 }
 
-                if (autoMute && nm.isNotificationPolicyAccessGranted) {
-                    runCatching {
-                        nm.setInterruptionFilter(NotificationManager.INTERRUPTION_FILTER_PRIORITY)
-                        scheduler.scheduleAutoRestoreDnd(eventEnd, notifId)
-                    }
-                }
-
                 // Chain-reschedule subsequent days so reminders never dry up without opening the app
                 val pending = goAsync()
                 CoroutineScope(Dispatchers.IO).launch {
@@ -110,6 +129,7 @@ class ReminderBroadcastReceiver : BroadcastReceiver() {
     companion object {
         const val ACTION_TRIGGER_REMINDER = "com.myfun.funclass.ACTION_TRIGGER_REMINDER"
         const val ACTION_DISMISS_NOTIFICATION = "com.myfun.funclass.ACTION_DISMISS_NOTIFICATION"
+        const val ACTION_ENABLE_DND = "com.myfun.funclass.ACTION_ENABLE_DND"
         const val ACTION_RESTORE_DND = "com.myfun.funclass.ACTION_RESTORE_DND"
 
         const val EXTRA_TITLE = "extra_title"
@@ -120,7 +140,6 @@ class ReminderBroadcastReceiver : BroadcastReceiver() {
         const val EXTRA_EVENT_END = "extra_event_end"
         const val EXTRA_COUNTDOWN = "extra_countdown"
         const val EXTRA_AUTO_DISMISS_MIN = "extra_auto_dismiss_min"
-        const val EXTRA_AUTO_MUTE = "extra_auto_mute"
         const val EXTRA_FLUID_CLOUD = "extra_fluid_cloud"
         const val EXTRA_FLUID_SHOW_COUNTDOWN = "extra_fluid_show_countdown"
         const val EXTRA_NOTIFICATION_ID = "extra_notification_id"
